@@ -404,8 +404,7 @@ void epd_display_time_with_date(struct date_time _time, uint16_t battery_mv, int
     char buff[100];
     battery_level = get_battery_level(battery_mv);
 
-    // 把实际生效的驱动型号也显示出来，方便确认设备吃的是哪一路（调试完可以去掉）
-    sprintf(buff, "BLZ_%02X%02X%02X %s", mac_public[2], mac_public[1], mac_public[0], epd_model_string[epd_model]);
+    sprintf(buff, "BLZ_%02X%02X%02X", mac_public[2], mac_public[1], mac_public[0]);
     obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, 10, 17, (char *)buff, 1);
 
     if (ble_get_connected())

@@ -372,28 +372,55 @@ _attribute_ram_code_ uint8_t EPD_BWR_213_Display_BWR(unsigned char *image, unsig
 }
 
 /**
- * 局刷。这块三色屏（BWR213 / SSD1675+1680）上，"host 写的局刷波形"完全不被驱动
- * （详见下面 LUT 数组的注释），只有控制器 **OTP 里的波形**能擦干净。
+ * 局刷。
  *
- * OTP 里不止一档波形（0x22 的 bit4/bit3 选不同 LUT），所以这里做成可选方案，
- * 改一行、烧一次就能对比：
+ * 这块三色屏（BWR213 / SSD1675+1680）上，"host 写的局刷波形"完全不被驱动
+ * （见下面 LUT 数组注释），只有控制器 **OTP 里的波形**能擦干净。
  *
- *   1 = 【已验证：擦得干净，但 ~10s、闪】0x18 开温度 → 0x22=0xB1 载 OTP 波形
- *       → 0x24 写黑白平面 → 0x22=0xC7 触发（= 全刷同一档波形）
- *   3 = 【待试】SSD1680(V4) 官方 partial 那条：0x3C=0x80 → 0x24 → 0x22=0xFF
- *       （0xFF 会去载 OTP 里的 mode-2 波形，官方 mono 2.13 的"快刷"就是它，
- *         期望：比方案 1 快很多、闪得也小）
- *   4 = 【待试】方案 1 的 0xB1 载波形 + 方案 3 的 0xFF 触发
+ * 两个独立开关，改完烧一次对比：
  *
- * 如果 3/4 都还是慢或者擦不干净，下一步就上"窗口化"：用 0x44/0x45 只开
- * 数字所在的那几条 gate（X 方向），刷新时间按 gate 行数等比缩短。
+ * 1) EPD_BWR213_PARTIAL_TRIGGER —— 决定用 OTP 里哪一档波形
+ *      1 = 0x18 → 0x22=0xB1(载 OTP 波形) → 0x24 → 0x22=0xC7   【已验证：擦得干净，但 ~10s、全屏闪】
+ *      3 = 0x3C=0x80 → 0x24 → 0x22=0xFF                        【SSD1680/V4 官方式】
+ *      4 = 0xB1 载波形 + 0x3C=0x80 + 0xFF
+ *
+ * 2) EPD_BWR213_PARTIAL_SEQ —— 直接指定 0x22 的字节（换 OTP 波形档，见下）
+ *
+ * 3) EPD_BWR213_PARTIAL_WINDOW —— 刷哪些 gate（实测：减不了闪，只有整屏波形在动）
+ *      0 = 整屏（和之前一样，128 条 gate 全扫，所以全屏闪）
+ *      1 = 只刷时间数字所在的那条带：gate X = WIN_X0..WIN_X1（≈ 面板竖直 40..87 行）
+ *          → 刷新时间按 gate 行数等比缩短（48/128），闪烁也只出现在这条带上
+ *          → 代价：这条带以外的内容这一次不刷新（静态内容本来就没错，每小时的全刷会兜）
+ *
+ * 注：坐标是按 FixBuffer 那套变换算的 —— epd_buffer[X + 16*Y]，
+ *     控制器 X = 面板的"竖直 8 像素带"、Y = 面板的"水平位置"。
+ *     时间串画在 (x=25, y=85)，DSEG14 字高 ~40px → py 45..85 → X = 5..10。
+ *     如果烧出来发现刷新的位置不在数字上，就调下面这两个数。
  */
-#define EPD_BWR213_PARTIAL_VARIANT 4
+#define EPD_BWR213_PARTIAL_TRIGGER 1
+#define EPD_BWR213_PARTIAL_WINDOW 0
+#define EPD_BWR213_WIN_X0 5
+#define EPD_BWR213_WIN_X1 10
+
+/* 局刷时是否省掉"重新载入 OTP 波形"这一步（0x18 + 0x22=0xB1 + 0x20）。
+   OTP 波形在整点全刷时已经载进去，而且我们不再写自定义 LUT，所以它会一直有效。
+   设 1 可以少一次 0x20 动作（如果你看到"闪两下"多半就是它）。
+   预算里默认 0（保守，和已验证能擦干净的那条完全一致）。 */
+#define EPD_BWR213_PARTIAL_SKIP_OTP_RELOAD 0
+
+/* 直接指定最后那次 0x22（"update sequence"）用的字节 —— 不同值会选 OTP 里不同的波形档。
+   0    = 用 TRIGGER 的默认值（TRIGGER 1 → 0xC7；3/4 → 0xFF）
+   想找"不整屏推白"的波形就把下面改成 0xFF / 0xF7 / 0xFC / 0xD7 / 0xE0 / 0x83 一个个试。 */
+#define EPD_BWR213_PARTIAL_SEQ 0xD7
 
 _attribute_ram_code_ void EPD_BWR_213_Display_Partial(unsigned char *image, int size)
 {
-#if (EPD_BWR213_PARTIAL_VARIANT == 1) || (EPD_BWR213_PARTIAL_VARIANT == 4)
-    // 温度传感器 + 载入 OTP 波形（和全刷开头一致）
+#if (EPD_BWR213_PARTIAL_WINDOW)
+    int xx, yy;
+#endif
+
+#if ((EPD_BWR213_PARTIAL_TRIGGER == 1) || (EPD_BWR213_PARTIAL_TRIGGER == 4)) && (!EPD_BWR213_PARTIAL_SKIP_OTP_RELOAD)
+    // 温度传感器 + 载入 OTP 波形
     EPD_WriteCmd(0x18);
     EPD_WriteData(0x80);
 
@@ -403,12 +430,43 @@ _attribute_ram_code_ void EPD_BWR_213_Display_Partial(unsigned char *image, int 
     EPD_CheckStatus_inverted(100);
 #endif
 
-#if (EPD_BWR213_PARTIAL_VARIANT == 3) || (EPD_BWR213_PARTIAL_VARIANT == 4)
+#if (EPD_BWR213_PARTIAL_TRIGGER == 3) || (EPD_BWR213_PARTIAL_TRIGGER == 4)
     // partial 的 BorderWaveform
     EPD_WriteCmd(0x3C);
     EPD_WriteData(0x80);
 #endif
 
+#if (EPD_BWR213_PARTIAL_WINDOW)
+    // ---- 只刷时间数字那条 gate 带 ----
+    EPD_WriteCmd(0x44); // RAM X start/end（= 面板竖直方向的片选）
+    EPD_WriteData(EPD_BWR213_WIN_X0);
+    EPD_WriteData(EPD_BWR213_WIN_X1);
+
+    // Y 窗口/起始点必须和"整屏那套"完全一致（0x0128 起、Y 递减），
+    // 否则 Y 的相位会绕一圈，画面会整体平移/跑到别处去。
+    EPD_WriteCmd(0x45); // RAM Y start/end（= 面板水平方向）
+    EPD_WriteData(0x28);
+    EPD_WriteData(0x01);
+    EPD_WriteData(0x00);
+    EPD_WriteData(0x00);
+
+    EPD_WriteCmd(0x4E); // Set RAM X address
+    EPD_WriteData(EPD_BWR213_WIN_X0);
+
+    EPD_WriteCmd(0x4F); // Set RAM Y address
+    EPD_WriteData(0x28);
+    EPD_WriteData(0x01);
+
+    EPD_WriteCmd(0x24);
+    for (yy = 0; yy < 256; yy++)
+    {
+        for (xx = EPD_BWR213_WIN_X0; xx <= EPD_BWR213_WIN_X1; xx++)
+        {
+            EPD_WriteData(image[xx + (yy << 4)]); // epd_buffer[X + 16*Y]
+        }
+    }
+#else
+    // ---- 整屏 ----
     // Set RAM X address / Set RAM Y address（沿用本驱动的区域参数）
     EPD_WriteCmd(0x4E);
     EPD_WriteData(0x00);
@@ -419,10 +477,13 @@ _attribute_ram_code_ void EPD_BWR_213_Display_Partial(unsigned char *image, int 
 
     // 只写黑白平面
     EPD_LoadImage(image, size, 0x24);
+#endif
 
     // 触发
     EPD_WriteCmd(0x22);
-#if (EPD_BWR213_PARTIAL_VARIANT == 1)
+#if (EPD_BWR213_PARTIAL_SEQ)
+    EPD_WriteData(EPD_BWR213_PARTIAL_SEQ); // 手动指定的 sequence
+#elif (EPD_BWR213_PARTIAL_TRIGGER == 1)
     EPD_WriteData(0xC7);
 #else
     EPD_WriteData(0xFF);
