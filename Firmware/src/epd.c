@@ -22,6 +22,11 @@ extern const uint8_t ucMirror[];
 #include "font16zh.h"
 #include "font30.h"
 
+/* 0 = 开机自动探测（默认）；设成型号编号则强制使用那个驱动，跳过探测。
+   1 = BW213(UC8151C)  2 = BWR213(SSD1675/1680)  4 = 213ICE(SSD1675/1680)
+   调试局刷时用它一格一格试，就能确认设备实际吃的是哪个驱动。 */
+#define FORCE_EPD_MODEL 0
+
 RAM uint8_t epd_model = 0; // 0 = Undetected, 1 = BW213, 2 = BWR213, 3 = BWR154, 4 = BW213ICE, 5 BWR296
 const char *epd_model_string[] = {"NC", "BW213", "BWR213", "BWR154", "213ICE", "BWR296"};
 RAM uint8_t epd_update_state = 0;
@@ -63,6 +68,10 @@ void set_EPD_wait_flush() {
 // Here we detect what E-Paper display is connected
 _attribute_ram_code_ void EPD_detect_model(void)
 {
+#if (FORCE_EPD_MODEL)
+    epd_model = FORCE_EPD_MODEL;
+    return;
+#endif
     EPD_init();
     // system power
     EPD_POWER_ON();
@@ -143,15 +152,21 @@ _attribute_ram_code_ void EPD_Display(unsigned char *image, unsigned char *red_i
     EPD_POWER_ON();
     WaitMs(5);
     // Reset the EPD driver IC
+    // 全刷：完整 10ms 复位；局刷：官方 partial 只给一个 1ms 的复位脉冲（复位太长/再叠 SW reset 会丢掉差分基准）
     gpio_write(EPD_RESET, 0);
-    WaitMs(10);
+    WaitMs(full_or_partial ? 10 : 1);
     gpio_write(EPD_RESET, 1);
-    WaitMs(10);
+    WaitMs(full_or_partial ? 10 : 1);
 
     if (epd_model == 1)
         epd_temperature = EPD_BW_213_Display(image, size, full_or_partial);
     else if (epd_model == 2)
-        epd_temperature = EPD_BWR_213_Display(image, size, full_or_partial);
+    {
+        if (full_or_partial)
+            epd_temperature = EPD_BWR_213_Display(image, size, full_or_partial);
+        else
+            EPD_BWR_213_Display_Partial(image, size); // 局刷不重读温度
+    }
 //    else if (epd_model == 3)
 //        epd_temperature = EPD_BWR_154_Display(image, size, full_or_partial);
     else if (epd_model == 4)
@@ -389,7 +404,8 @@ void epd_display_time_with_date(struct date_time _time, uint16_t battery_mv, int
     char buff[100];
     battery_level = get_battery_level(battery_mv);
 
-    sprintf(buff, "BLZ_%02X%02X%02X", mac_public[2], mac_public[1], mac_public[0]);
+    // 把实际生效的驱动型号也显示出来，方便确认设备吃的是哪一路（调试完可以去掉）
+    sprintf(buff, "BLZ_%02X%02X%02X %s", mac_public[2], mac_public[1], mac_public[0], epd_model_string[epd_model]);
     obdWriteStringCustom(&obd, (GFXfont *)&Dialog_plain_16, 10, 17, (char *)buff, 1);
 
     if (ble_get_connected())
